@@ -1,4 +1,6 @@
 *.swp
 
 env/
-npshell
+np_simple
+np_single_proc
+np_multi_proc
