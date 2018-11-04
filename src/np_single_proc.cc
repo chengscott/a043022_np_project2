@@ -87,15 +87,21 @@ void exec(const vector<vector<string>> &args, deque<int> &pidout, int fdin,
 // default file permission mask 0666
 const mode_t file_perm =
     S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH;
-// stdandard file descriptors
+// standard file descriptors
 int stdfd[3];
 // user info
 int np_user[30];
 string np_name[30], np_address[30];
-// user npshell
+// npshell
+int np_line[30];
 map<string, string> np_env[30];
-int np_line[30], np_fd_table[30][2000][2];
+// numbered pipe
+int np_fd_table[30][2000][2];
 deque<int> np_pid_table[30][2000];
+// user pipe
+int np_user_pipe[30][30][2];
+deque<int> np_up_pid[30][30];
+string np_up_cmd[30][30];
 int initialize(int csock) {
     int uid = -1;
     for (size_t i = 0; i < 30; ++i) {
@@ -111,6 +117,7 @@ int initialize(int csock) {
     np_env[uid]["PATH"] = "bin:/";
     np_line[uid] = 1;
     for (int(&fd)[2] : np_fd_table[uid]) fd[0] = 0, fd[1] = 1;
+    for (int(&fd)[2] : np_user_pipe[uid]) fd[0] = 0, fd[1] = 1;
     return uid;
 }
 
@@ -118,7 +125,22 @@ void terminate(int uid) {
     np_user[uid] = -1;
     np_name[uid] = "(no name)";
     np_env[uid].clear();
+    // TODO: wait or kill
     for (size_t i = 0; i < 2000; ++i) np_pid_table[uid][i].clear();
+    for (int(&user_pipe)[30][2] : np_user_pipe) {
+        int(&fd)[2] = user_pipe[uid];
+        close(fd[0]);
+        close(fd[1]);
+        fd[0] = 0, fd[1] = 1;
+    }
+    for (int(&fd)[2] : np_user_pipe[uid]) {
+        close(fd[0]);
+        close(fd[1]);
+        fd[0] = 0, fd[1] = 1;
+    }
+    // TODO: wait or kill
+    for (deque<int>(&up_pid)[30] : np_up_pid) up_pid[uid].clear();
+    for (deque<int> &up_pid : np_up_pid[uid]) up_pid.clear();
 }
 
 void broadcast(string msg) {
@@ -131,7 +153,7 @@ void broadcast(string msg) {
     }
 }
 
-int npshell(int uid) {
+int npshell(const int uid) {
     const int sock = np_user[uid];
     for (size_t i = 0; i < 3; ++i) dup2(sock, i);
     // default environment variables
@@ -148,10 +170,13 @@ int npshell(int uid) {
         cout << endl;
         return -1;
     }
+    if (!cmd.empty() && cmd[cmd.length() - 1] == '\r') {
+        cmd.erase(cmd.length() - 1);
+    }
+    const string full_cmd = cmd;
     stringstream ss(cmd);
     ss >> cmd;
     if (cmd.empty()) return 0;
-    if (cmd == "\r") return 0;
     line = (line + 1) % 2000;
     if (cmd == "setenv") {
         // synopsis: setenv [environment variable] [value to assign]
@@ -184,7 +209,7 @@ int npshell(int uid) {
             broadcast(msg);
         }
     } else if (cmd == "who") {
-        cout << "<ID>\t<nickname>\t<IP/port>\t <indicate me>" << endl;
+        cout << "<ID>\t<nickname>\t<IP/port>\t<indicate me>" << endl;
         for (int i = 0; i < 30; ++i) {
             if (np_user[i] != -1) {
                 cout << i + 1 << '\t' << np_name[i] << '\t' << np_address[i];
@@ -213,11 +238,12 @@ int npshell(int uid) {
     } else {
         /* mode
          0: stdout to overwrite file
+         8: stdout user pipe
          10: single line stdout pipe (default)
          20: stdout numbered pipe
          21: stdout stderr numbered pipe
         */
-        int np = -1, mode = 10;
+        int mode = 10, np = -1, upin = -1, upout = -1;
         // parse all commands and arguments
         vector<vector<string>> args;
         bool has_next = true;
@@ -229,6 +255,15 @@ int npshell(int uid) {
                     mode = 0;
                     ss >> cmd;
                     break;
+                } else if (arg[0] == '>') {
+                    mode = 8;
+                    upout = stoi(arg.substr(1, arg.size() - 1));
+                    assert(upout >= 0);
+                    continue;
+                } else if (arg[0] == '<') {
+                    upin = stoi(arg.substr(1, arg.size() - 1));
+                    assert(upin >= 0);
+                    continue;
                 } else if (arg == "|") {
                     has_next = true;
                     ss >> cmd;
@@ -249,6 +284,62 @@ int npshell(int uid) {
                                 pid_table[line].begin(), pid_table[line].end());
         pid_table[line].clear();
         // prepare fd
+        if (upin != -1) {
+            --upin;
+            if (upin >= 30 || np_user[upin] == -1) {
+                cout << "*** Error: user #" << (upin + 1)
+                     << " does not exist yet. ***" << endl;
+                return 0;
+            } else if (!IS_PIPE(np_user_pipe[upin][uid][0])) {
+                cout << "*** Error: the pipe #" << (upin + 1) << "->#"
+                     << (uid + 1) << " does not exist yet. ***" << endl;
+                return 0;
+            } else {
+                string msg = "*** " + np_name[upin] + " (#" +
+                             to_string(upin + 1) + ") just received from " +
+                             np_name[uid] + " (#" + to_string(uid + 1) +
+                             ") by '" + np_up_cmd[upin][uid] + "' ***\n";
+                broadcast(msg);
+                // user pipe
+                pid_table[nline].insert(pid_table[nline].begin(),
+                                        np_up_pid[upin][uid].begin(),
+                                        np_up_pid[upin][uid].end());
+                np_up_pid[upin][uid].clear();
+                close(np_user_pipe[upin][uid][1]);
+                fd_table[line][0] = np_user_pipe[upin][uid][0];
+            }
+        }
+        if (upout != -1) {
+            --upout;
+            if (upout >= 30 || np_user[upout] == -1) {
+                cout << "*** Error: user #" << (upout + 1)
+                     << " does not exist yet. ***" << endl;
+                return 0;
+            } else if (IS_PIPE(np_user_pipe[uid][upout][0])) {
+                cout << "*** Error: the pipe #" << (uid + 1) << "->#"
+                     << (upout + 1) << " already exists. ***" << endl;
+                return 0;
+            } else {
+                string msg = "*** " + np_name[uid] + " (#" +
+                             to_string(uid + 1) + ") just piped '" + full_cmd +
+                             "' to " + np_name[upout] + " (#" +
+                             to_string(upout + 1) + ") ***\n";
+                broadcast(msg);
+                // pid
+                np_up_pid[uid][upout].insert(np_up_pid[uid][upout].begin(),
+                                             pid_table[nline].begin(),
+                                             pid_table[nline].end());
+                pid_table[nline].clear();
+                // save full_cmd
+                np_up_cmd[uid][upout] = full_cmd;
+                // open user pipe
+                while (pipe(np_user_pipe[uid][upout]) == -1)
+                    mywait(pid_table[nline]);
+                fd_table[nline][1] = np_user_pipe[uid][upout][1];
+            }
+        }
+        deque<int> &pidout =
+            (mode == 8) ? np_up_pid[uid][upout] : pid_table[nline];
         if (mode == 0) {
             // 0: open file
             fd_table[nline][1] =
@@ -261,9 +352,13 @@ int npshell(int uid) {
         }
         // execute commands
         if (IS_PIPE(fd_table[line][1])) close(fd_table[line][1]);
-        exec(args, pid_table[nline], fd_table[line][0], fd_table[nline][1],
-             mode);
+        exec(args, pidout, fd_table[line][0], fd_table[nline][1], mode);
         if (IS_PIPE(fd_table[line][0])) close(fd_table[line][0]);
+        if (upin != -1) {
+            close(np_user_pipe[upin][uid][0]);
+            np_user_pipe[upin][uid][0] = 0;
+            np_user_pipe[upin][uid][0] = 1;
+        }
         // wait for current line
         if (mode < 20) {
             for (int p : pid_table[nline]) waitpid(p, nullptr, 0);
