@@ -134,6 +134,10 @@ void broadcast(string msg) {
 int npshell(int uid) {
     const int sock = np_user[uid];
     for (size_t i = 0; i < 3; ++i) dup2(sock, i);
+    // default environment variables
+    clearenv();
+    for (const pair<string, string> var : np_env[uid])
+        setenv(var.first.c_str(), var.second.c_str(), 1);
     // numbered pipe
     int &line = np_line[uid];
     int(&fd_table)[2000][2] = np_fd_table[uid];
@@ -149,9 +153,6 @@ int npshell(int uid) {
     if (cmd.size() == 0) return 0;
     if (cmd == "\r") return 0;
     line = (line + 1) % 2000;
-    // set environment variables
-    for (const pair<string, string> var : np_env[uid])
-        setenv(var.first.c_str(), var.second.c_str(), 1);
     if (cmd == "setenv") {
         // synopsis: setenv [environment variable] [value to assign]
         ss >> cmd >> arg;
@@ -164,9 +165,6 @@ int npshell(int uid) {
         if (env) cout << env << endl;
     } else if (cmd == "exit") {
         // synopsis: exit
-        // unset env
-        for (const pair<string, string> var : np_env[uid])
-            unsetenv(var.first.c_str());
         return -1;
     } else if (cmd == "name") {
         ss >> arg;
@@ -272,13 +270,10 @@ int npshell(int uid) {
         fd_table[line][0] = 0;
         fd_table[line][1] = 1;
     }
-    // unset
-    for (const pair<string, string> var : np_env[uid])
-        unsetenv(var.first.c_str());
     return 0;
 }
 
-int main() {
+int main(int argc, char **argv) {
     // server socket
     int ssock = socket(AF_INET, SOCK_STREAM, 0);
     int on = 1;
@@ -286,7 +281,14 @@ int main() {
     struct sockaddr_in saddr, caddr;
     saddr.sin_family = AF_INET;
     saddr.sin_addr.s_addr = htonl(INADDR_ANY);
-    saddr.sin_port = htons(5566);
+    if (argc > 1) {
+        uint16_t port;
+        stringstream ss(argv[1]);
+        ss >> port;
+        saddr.sin_port = htons(port);
+    } else {
+        saddr.sin_port = htons(5566);
+    }
     bind(ssock, (struct sockaddr *)&saddr, sizeof(saddr));
     listen(ssock, 30);
     // client socket

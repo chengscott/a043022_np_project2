@@ -82,13 +82,9 @@ void exec(const vector<vector<string>> &args, deque<int> &pidout, int fdin,
     }
 }
 
-void reaper(int sig) {
-    while (waitpid(-1, NULL, WNOHANG) > 0)
-        ;
-}
-
-int main() {
+void npshell() {
     // default environment variables
+    clearenv();
     setenv("PATH", "bin:.", 1);
     // default file permission mask 0666
     mode_t file_perm =
@@ -97,35 +93,8 @@ int main() {
     int line, fd_table[2000][2];
     for (size_t i = 0; i < 2000; ++i) fd_table[i][0] = 0, fd_table[i][1] = 1;
     deque<int> pid_table[2000];
+    // npshell
     string cmd, arg;
-    // server socket
-    int ssock = socket(AF_INET, SOCK_STREAM, 0);
-    struct sockaddr_in saddr, caddr;
-    saddr.sin_family = AF_INET;
-    saddr.sin_addr.s_addr = htonl(INADDR_ANY);
-    saddr.sin_port = htons(5566);
-    bind(ssock, (struct sockaddr *)&saddr, sizeof(saddr));
-    listen(ssock, 5);
-    // reap client child
-    struct sigaction sa;
-    sa.sa_handler = &reaper;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = SA_RESTART | SA_NOCLDSTOP;
-    sigaction(SIGCHLD, &sa, NULL);
-    // accept client
-    int csock;
-    socklen_t clen = sizeof(caddr);
-    while (true) {
-        csock = accept(ssock, (struct sockaddr *)&caddr, &clen);
-        if (fork() == 0) {
-            close(ssock);
-            break;
-        }
-        close(csock);
-    }
-    dup2(csock, 0);
-    dup2(csock, 1);
-    dup2(csock, 2);
     while (true) {
         // prompt string
         cout << "% ";
@@ -214,4 +183,50 @@ int main() {
             fd_table[line][1] = 1;
         }
     }
+}
+
+void reaper(int sig) {
+    while (waitpid(-1, NULL, WNOHANG) > 0)
+        ;
+}
+
+extern char **environ;
+int main(int argc, char **argv) {
+    // server socket
+    int ssock = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in saddr, caddr;
+    saddr.sin_family = AF_INET;
+    saddr.sin_addr.s_addr = htonl(INADDR_ANY);
+    if (argc > 1) {
+        uint16_t port;
+        stringstream ss(argv[1]);
+        ss >> port;
+        saddr.sin_port = htons(port);
+    } else {
+        saddr.sin_port = htons(5566);
+    }
+    bind(ssock, (struct sockaddr *)&saddr, sizeof(saddr));
+    listen(ssock, 5);
+    // reap client child
+    struct sigaction sa;
+    sa.sa_handler = &reaper;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART | SA_NOCLDSTOP;
+    sigaction(SIGCHLD, &sa, NULL);
+    // accept client
+    int csock;
+    socklen_t clen = sizeof(caddr);
+    while (true) {
+        csock = accept(ssock, (struct sockaddr *)&caddr, &clen);
+        if (fork() == 0) {
+            close(ssock);
+            break;
+        }
+        close(csock);
+    }
+    // client npshell
+    dup2(csock, 0);
+    dup2(csock, 1);
+    dup2(csock, 2);
+    npshell();
 }
