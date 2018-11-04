@@ -23,21 +23,21 @@ void convert(const vector<string> &from, vector<char *> &to) {
     auto it_end = from.end();
     for (auto it = from.begin(); it != it_end; ++it)
         to.push_back(const_cast<char *>(it->c_str()));
-    to.push_back(NULL);
+    to.push_back(nullptr);
 }
 
 void mywait(deque<int> &pid) {
     int p;
     bool has_wait = false;
     // clean up finished process
-    while ((p = waitpid(-1, NULL, WNOHANG)) > 0) {
+    while ((p = waitpid(-1, nullptr, WNOHANG)) > 0) {
         pid.erase(std::remove(pid.begin(), pid.end(), p), pid.end());
         has_wait = true;
     }
     if (has_wait) return;
     // wait for the front of deque
     if (!pid.empty()) {
-        waitpid(pid.front(), NULL, 0);
+        waitpid(pid.front(), nullptr, 0);
         pid.pop_front();
     }
 }
@@ -98,19 +98,19 @@ int np_line[30], np_fd_table[30][2000][2];
 deque<int> np_pid_table[30][2000];
 int initialize(int csock) {
     int uid = -1;
-    for (size_t i = 0; i < 30; ++i)
+    for (size_t i = 0; i < 30; ++i) {
         if (np_user[i] == -1) {
             np_user[i] = csock;
             uid = i;
             break;
         }
+    }
     // info
     np_name[uid] = "(no name)";
     // shell
     np_env[uid]["PATH"] = "bin:/";
     np_line[uid] = 1;
-    int(&fd_table)[2000][2] = np_fd_table[uid];
-    for (size_t i = 0; i < 2000; ++i) fd_table[i][0] = 0, fd_table[i][1] = 1;
+    for (int(&fd)[2] : np_fd_table[uid]) fd[0] = 0, fd[1] = 1;
     return uid;
 }
 
@@ -124,9 +124,9 @@ void terminate(int uid) {
 void broadcast(string msg) {
     const char *cmsg = msg.c_str();
     size_t clen = msg.size() + 1;
-    for (size_t i = 0; i < 30; ++i) {
-        if (np_user[i] != -1) {
-            write(np_user[i], cmsg, clen);
+    for (int sock : np_user) {
+        if (sock != -1) {
+            write(sock, cmsg, clen);
         }
     }
 }
@@ -150,7 +150,7 @@ int npshell(int uid) {
     }
     stringstream ss(cmd);
     ss >> cmd;
-    if (cmd.size() == 0) return 0;
+    if (cmd.empty()) return 0;
     if (cmd == "\r") return 0;
     line = (line + 1) % 2000;
     if (cmd == "setenv") {
@@ -162,18 +162,19 @@ int npshell(int uid) {
         // synopsis: printenv [environment variable]
         ss >> arg;
         char *env = getenv(arg.c_str());
-        if (env) cout << env << endl;
+        if (env != nullptr) cout << env << endl;
     } else if (cmd == "exit") {
         // synopsis: exit
         return -1;
     } else if (cmd == "name") {
         ss >> arg;
         bool found = false;
-        for (size_t i = 0; i < 30; ++i)
-            if (np_name[i] == arg) {
+        for (const string &name : np_name) {
+            if (name == arg) {
                 found = true;
                 break;
             }
+        }
         if (found) {
             cout << "*** User '" << arg << "' already exists. ***" << endl;
         } else {
@@ -254,8 +255,9 @@ int npshell(int uid) {
                 open(cmd.c_str(), O_WRONLY | O_CREAT | O_TRUNC, file_perm);
         } else if (mode == 20 || mode == 21) {
             // 20, 21: open numbered pipe
-            if (!IS_PIPE(fd_table[nline][0]))
+            if (!IS_PIPE(fd_table[nline][0])) {
                 while (pipe(fd_table[nline]) == -1) mywait(pid_table[nline]);
+            }
         }
         // execute commands
         if (IS_PIPE(fd_table[line][1])) close(fd_table[line][1]);
@@ -264,7 +266,7 @@ int npshell(int uid) {
         if (IS_PIPE(fd_table[line][0])) close(fd_table[line][0]);
         // wait for current line
         if (mode < 20) {
-            for (int p : pid_table[nline]) waitpid(p, NULL, 0);
+            for (int p : pid_table[nline]) waitpid(p, nullptr, 0);
         }
         // cleanup current line
         fd_table[line][0] = 0;
@@ -301,7 +303,7 @@ int main(int argc, char **argv) {
     FD_SET(ssock, &afds);
     // initialize
     for (size_t i = 0; i < 3; ++i) stdfd[i] = dup(i);
-    for (size_t i = 0; i < 30; ++i) np_user[i] = -1;
+    for (int &sock : np_user) sock = -1;
     // welcome message
     const char welcome[] =
         "***************************************\n"
@@ -310,7 +312,7 @@ int main(int argc, char **argv) {
     const size_t wlen = sizeof(welcome);
     while (true) {
         memcpy(&rfds, &afds, sizeof(rfds));
-        select(nfds, &rfds, NULL, NULL, NULL);
+        select(nfds, &rfds, nullptr, nullptr, nullptr);
         if (FD_ISSET(ssock, &rfds)) {
             csock = accept(ssock, (struct sockaddr *)&caddr, &clen);
             FD_SET(csock, &afds);
@@ -356,5 +358,5 @@ int main(int argc, char **argv) {
             }
         }
     }
-    for (size_t i = 0; i < 3; ++i) close(stdfd[i]);
+    for (int fd : stdfd) close(fd);
 }

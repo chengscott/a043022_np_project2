@@ -1,11 +1,11 @@
 #include <fcntl.h>
 #include <netinet/in.h>
-#include <signal.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #include <algorithm>
 #include <cassert>
+#include <csignal>
 #include <cstdlib>
 #include <deque>
 #include <iostream>
@@ -21,21 +21,21 @@ void convert(const vector<string> &from, vector<char *> &to) {
     auto it_end = from.end();
     for (auto it = from.begin(); it != it_end; ++it)
         to.push_back(const_cast<char *>(it->c_str()));
-    to.push_back(NULL);
+    to.push_back(nullptr);
 }
 
 void mywait(deque<int> &pid) {
     int p;
     bool has_wait = false;
     // clean up finished process
-    while ((p = waitpid(-1, NULL, WNOHANG)) > 0) {
+    while ((p = waitpid(-1, nullptr, WNOHANG)) > 0) {
         pid.erase(std::remove(pid.begin(), pid.end(), p), pid.end());
         has_wait = true;
     }
     if (has_wait) return;
     // wait for the front of deque
     if (!pid.empty()) {
-        waitpid(pid.front(), NULL, 0);
+        waitpid(pid.front(), nullptr, 0);
         pid.pop_front();
     }
 }
@@ -91,7 +91,7 @@ void npshell() {
         S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH;
     // numbered pipe
     int line, fd_table[2000][2];
-    for (size_t i = 0; i < 2000; ++i) fd_table[i][0] = 0, fd_table[i][1] = 1;
+    for (int(&fd)[2] : fd_table) fd[0] = 0, fd[1] = 1;
     deque<int> pid_table[2000];
     // npshell
     string cmd, arg;
@@ -176,7 +176,7 @@ void npshell() {
             if (IS_PIPE(fd_table[line][0])) close(fd_table[line][0]);
             // wait for current line
             if (mode < 20) {
-                for (int p : pid_table[nline]) waitpid(p, NULL, 0);
+                for (int p : pid_table[nline]) waitpid(p, nullptr, 0);
             }
             // cleanup current line
             fd_table[line][0] = 0;
@@ -186,7 +186,7 @@ void npshell() {
 }
 
 void reaper(int sig) {
-    while (waitpid(-1, NULL, WNOHANG) > 0)
+    while (waitpid(-1, nullptr, WNOHANG) > 0)
         ;
 }
 
@@ -212,7 +212,7 @@ int main(int argc, char **argv) {
     sa.sa_handler = &reaper;
     sigemptyset(&sa.sa_mask);
     sa.sa_flags = SA_RESTART | SA_NOCLDSTOP;
-    sigaction(SIGCHLD, &sa, NULL);
+    sigaction(SIGCHLD, &sa, nullptr);
     // accept client
     int csock;
     socklen_t clen = sizeof(caddr);
