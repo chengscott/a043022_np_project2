@@ -14,7 +14,6 @@
 #include <sstream>
 #include <string>
 #include <vector>
-//#define DBG(x, ...) fprintf(stderr, x, __VA_ARGS__);
 #define IS_PIPE(x) ((x) > 2)
 using namespace std;
 
@@ -44,7 +43,7 @@ void mywait(deque<int> &pid) {
 
 void exec(const vector<vector<string>> &args, deque<int> &pidout, int fdin,
           int fdout, int mode) {
-    // fdin -> (exec args)  -> fdout
+    // fdin -> (exec args) -> fdout
     const size_t len = args.size();
     size_t i, cur;
     int pid[2], fd[2][2];
@@ -170,9 +169,10 @@ int npshell(const int uid) {
         cout << endl;
         return -1;
     }
-    if (!cmd.empty() && cmd[cmd.length() - 1] == '\r') {
+    if (!cmd.empty() && cmd[cmd.length() - 1] == '\n')
         cmd.erase(cmd.length() - 1);
-    }
+    if (!cmd.empty() && cmd[cmd.length() - 1] == '\r')
+        cmd.erase(cmd.length() - 1);
     const string full_cmd = cmd;
     stringstream ss(cmd);
     ss >> cmd;
