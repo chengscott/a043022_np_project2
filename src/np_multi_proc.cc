@@ -1,6 +1,12 @@
+#include <arpa/inet.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <string.h>
+#include <sys/ipc.h>
+#include <sys/sem.h>
+#include <sys/shm.h>
 #include <sys/stat.h>
+#include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #include <algorithm>
@@ -118,6 +124,14 @@ void npshell() {
         } else if (cmd == "exit") {
             // synopsis: exit
             break;
+        } else if (cmd == "name") {
+            // synopsis: name [new username]
+        } else if (cmd == "who") {
+            // synopsis: who
+        } else if (cmd == "tell") {
+            // synopsis: tell [user id] [message]
+        } else if (cmd == "yell") {
+            // synopsis: yell [message]
         } else {
             /* mode
              0: stdout to overwrite file
@@ -189,7 +203,105 @@ void reaper(int sig) {
         ;
 }
 
+void sem_wait(int key, short unsigned int sem = 0) {
+    // lock
+    static struct sembuf act = {sem, -1, SEM_UNDO};
+    semop(key, &act, sizeof(act));
+}
+
+void sem_signal(int key, short unsigned int sem = 0) {
+    // unlock
+    static struct sembuf act = {sem, 1, SEM_UNDO};
+    semop(key, &act, sizeof(act));
+}
+
+int UID = -1;
+int shm_pid, shm_address[30], shm_name[30], shm_msg[30];
+int sem_pid, sem_address, sem_name, sem_msg;
+void cleanIPC(int sig) {
+    // shared memory
+    shmctl(shm_pid, IPC_RMID, nullptr);
+    for (size_t i = 0; i < 30; ++i) {
+        shmctl(shm_address[i], IPC_RMID, nullptr);
+        shmctl(shm_name[i], IPC_RMID, nullptr);
+        shmctl(shm_msg[i], IPC_RMID, nullptr);
+    }
+    // semaphore
+    semctl(sem_pid, 0, IPC_RMID, nullptr);
+    semctl(sem_address, 0, IPC_RMID, nullptr);
+    semctl(sem_name, 0, IPC_RMID, nullptr);
+    semctl(sem_msg, 0, IPC_RMID, nullptr);
+    exit(0);
+}
+
+void broadcast(string msg) {
+    sem_wait(sem_pid);
+    int *np_user = (int *)shmat(shm_pid, nullptr, 0);
+    for (size_t i = 0; i < 30; ++i) {
+        if (np_user[i] != -1) {
+            sem_wait(sem_msg, i);
+            char *np_msg = (char *)shmat(shm_msg[i], nullptr, 0);
+            strcpy(np_msg, msg.c_str());
+            shmdt(np_msg);
+            kill(np_user[i], SIGUSR1);
+        }
+    }
+    for (size_t i = 0; i < 30; ++i) {
+        if (np_user[i] != -1) {
+            sem_wait(sem_msg, i);
+            sem_signal(sem_msg, i);
+        }
+    }
+    shmdt(np_user);
+    sem_signal(sem_pid);
+}
+
+void show_msg(int sig) {
+    char *np_msg = (char *)shmat(shm_msg[UID], nullptr, 0);
+    cout << string(np_msg);
+    shmdt(np_msg);
+    sem_signal(sem_msg, UID);
+}
+
+int initialize_uid() {
+    int ret;
+    sem_wait(sem_pid);
+    int *np_pid = (int *)shmat(shm_pid, nullptr, 0);
+    for (size_t i = 0; i < 30; ++i) {
+        if (np_pid[i] == -1) {
+            ret = i;
+            break;
+        }
+    }
+    shmdt(np_pid);
+    sem_signal(sem_pid);
+    return ret;
+}
+
 int main(int argc, char **argv) {
+    // shared memory
+    const int ipcflag = IPC_CREAT | 0600;
+    shm_pid = shmget(IPC_PRIVATE, 30 * sizeof(int), ipcflag);
+    for (size_t i = 0; i < 30; ++i) {
+        shm_address[i] = shmget(IPC_PRIVATE, 24, ipcflag);
+        shm_name[i] = shmget(IPC_PRIVATE, 24, ipcflag);
+        shm_msg[i] = shmget(IPC_PRIVATE, 1025, ipcflag);
+    }
+    // initialized shared memory
+    int *np_pid = (int *)shmat(shm_pid, nullptr, 0);
+    for (size_t i = 0; i < 30; ++i) np_pid[i] = -1;
+    shmdt(np_pid);
+    // semaphore
+    sem_pid = semget(IPC_PRIVATE, 1, ipcflag);
+    sem_address = semget(IPC_PRIVATE, 1, ipcflag);
+    sem_name = semget(IPC_PRIVATE, 1, ipcflag);
+    sem_msg = semget(IPC_PRIVATE, 30 * 1, ipcflag);
+    // cleanup ipc
+    struct sigaction sa_sigterm;
+    sa_sigterm.sa_handler = &cleanIPC;
+    sigemptyset(&sa_sigterm.sa_mask);
+    sigaction(SIGINT, &sa_sigterm, nullptr);
+    sigaction(SIGTERM, &sa_sigterm, nullptr);
     // server socket
     int ssock = socket(AF_INET, SOCK_STREAM, 0);
     struct sockaddr_in saddr, caddr;
@@ -206,25 +318,62 @@ int main(int argc, char **argv) {
     bind(ssock, (struct sockaddr *)&saddr, sizeof(saddr));
     listen(ssock, 5);
     // reap client child
-    struct sigaction sa;
-    sa.sa_handler = &reaper;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = SA_RESTART | SA_NOCLDSTOP;
-    sigaction(SIGCHLD, &sa, nullptr);
+    struct sigaction sa_sigchld;
+    sa_sigchld.sa_handler = &reaper;
+    sigemptyset(&sa_sigchld.sa_mask);
+    sa_sigchld.sa_flags = SA_RESTART | SA_NOCLDSTOP;
+    sigaction(SIGCHLD, &sa_sigchld, nullptr);
     // accept client
-    int csock;
+    int csock, pid, uid;
+    char cip[INET_ADDRSTRLEN];
     socklen_t clen = sizeof(caddr);
+    string address;
     while (true) {
         csock = accept(ssock, (struct sockaddr *)&caddr, &clen);
-        if (fork() == 0) {
+        inet_ntop(AF_INET, &caddr.sin_addr, cip, INET_ADDRSTRLEN);
+        address = string(cip) + "/" + to_string(htons(caddr.sin_port));
+        uid = initialize_uid();
+        // shm_name
+        sem_wait(sem_name);
+        char *np_name = (char *)shmat(shm_name[uid], nullptr, 0);
+        strcpy(np_name, "(no name)");
+        shmdt(np_name);
+        sem_signal(sem_name);
+        // shm_address
+        sem_wait(sem_address);
+        char *np_address = (char *)shmat(shm_address[uid], nullptr, 0);
+        strcpy(np_address, address.c_str());
+        shmdt(np_address);
+        sem_signal(sem_address);
+        // shm_pid
+        sem_wait(sem_pid);
+        // fork client
+        if ((pid = fork()) == 0) {
             close(ssock);
             break;
         }
         close(csock);
+        int *np_pid = (int *)shmat(shm_pid, nullptr, 0);
+        np_pid[uid] = pid;
+        shmdt(np_pid);
+        sem_signal(sem_pid);
     }
     // client npshell
     dup2(csock, 0);
     dup2(csock, 1);
     dup2(csock, 2);
+    // message handler
+    UID = uid;
+    struct sigaction sa_sigusr1;
+    sa_sigusr1.sa_handler = &show_msg;
+    sigemptyset(&sa_sigusr1.sa_mask);
+    sigaction(SIGUSR1, &sa_sigusr1, nullptr);
+    cout << "****************************************" << endl
+         << "** Welcome to the information server. **" << endl
+         << "****************************************" << endl;
+    // broadcast login
+    string msg =
+        "*** User '(no name)' entered from " + string(address) + ". ***\n";
+    broadcast(msg);
     npshell();
 }
