@@ -1,7 +1,6 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netinet/in.h>
-#include <string.h>
 #include <sys/ipc.h>
 #include <sys/sem.h>
 #include <sys/shm.h>
@@ -13,6 +12,7 @@
 #include <cassert>
 #include <csignal>
 #include <cstdlib>
+#include <cstring>
 #include <deque>
 #include <iostream>
 #include <sstream>
@@ -20,6 +20,39 @@
 #include <vector>
 #define IS_PIPE(x) ((x) > 2)
 using namespace std;
+
+int my_uid = -1;
+string my_address, my_name;
+int shm_pid, shm_address[30], shm_name[30], shm_msg[30];
+int sem_pid, sem_address, sem_name, sem_msg;
+
+void sem_wait(int key, short unsigned int sem = 0) {
+    // lock
+    static struct sembuf act = {sem, -1, SEM_UNDO};
+    semop(key, &act, sizeof(act));
+}
+
+void sem_signal(int key, short unsigned int sem = 0) {
+    // unlock
+    static struct sembuf act = {sem, 1, SEM_UNDO};
+    semop(key, &act, sizeof(act));
+}
+
+void broadcast(string msg) {
+    sem_wait(sem_pid);
+    int *np_user = (int *)shmat(shm_pid, nullptr, 0);
+    for (size_t i = 0; i < 30; ++i) {
+        if (np_user[i] != -1) {
+            sem_wait(sem_msg, i);
+            char *np_msg = (char *)shmat(shm_msg[i], nullptr, 0);
+            strcpy(np_msg, msg.c_str());
+            shmdt(np_msg);
+            kill(np_user[i], SIGUSR1);
+        }
+    }
+    shmdt(np_user);
+    sem_signal(sem_pid);
+}
 
 void convert(const vector<string> &from, vector<char *> &to) {
     // convert vector of c++ string to vector of c string
@@ -108,9 +141,14 @@ void npshell() {
             cout << endl;
             break;
         }
+        if (!cmd.empty() && cmd[cmd.length() - 1] == '\n')
+            cmd.erase(cmd.length() - 1);
+        if (!cmd.empty() && cmd[cmd.length() - 1] == '\r')
+            cmd.erase(cmd.length() - 1);
+        const string full_cmd = cmd;
         stringstream ss(cmd);
         ss >> cmd;
-        if (cmd.size() == 0) continue;
+        if (cmd.empty()) continue;
         line = (line + 1) % 2000;
         if (cmd == "setenv") {
             // synopsis: setenv [environment variable] [value to assign]
@@ -126,12 +164,85 @@ void npshell() {
             break;
         } else if (cmd == "name") {
             // synopsis: name [new username]
+            ss >> arg;
+            bool found = false;
+            const char *name = arg.c_str();
+            char *np_name;
+            sem_wait(sem_name);
+            for (int shm_ni : shm_name) {
+                np_name = (char *)shmat(shm_ni, nullptr, 0);
+                if (strcmp(np_name, name) == 0) {
+                    found = true;
+                    shmdt(np_name);
+                    break;
+                }
+                shmdt(np_name);
+            }
+            if (found) {
+                cout << "*** User '" << arg << "' already exists. ***" << endl;
+            } else {
+                np_name = (char *)shmat(shm_name[my_uid], nullptr, 0);
+                my_name = name;
+                strcpy(np_name, name);
+                shmdt(np_name);
+                string msg = "*** User from " + my_address + " is named '" +
+                             arg + "'. ***\n";
+                broadcast(msg);
+            }
+            sem_signal(sem_name);
         } else if (cmd == "who") {
             // synopsis: who
+            sem_wait(sem_pid);
+            sem_wait(sem_address);
+            sem_wait(sem_name);
+            int *np_pid = (int *)shmat(shm_pid, nullptr, 0);
+            char *np_address, *np_name;
+            cout << "<ID>\t<nickname>\t<IP/port>\t<indicate me>" << endl;
+            for (int i = 0; i < 30; ++i) {
+                if (np_pid[i] != -1) {
+                    np_address = (char *)shmat(shm_address[i], nullptr, 0);
+                    np_name = (char *)shmat(shm_name[i], nullptr, 0);
+                    cout << i + 1 << '\t' << string(np_name) << '\t'
+                         << string(np_address);
+                    if (i == my_uid) cout << "\t<-me";
+                    cout << endl;
+                    shmdt(np_address);
+                    shmdt(np_name);
+                }
+            }
+            shmdt(np_pid);
+            sem_signal(sem_pid);
+            sem_signal(sem_address);
+            sem_signal(sem_name);
         } else if (cmd == "tell") {
             // synopsis: tell [user id] [message]
+            int tuid, tpid;
+            ss >> tuid;
+            --tuid;
+            ws(ss);
+            getline(ss, arg);
+            sem_wait(sem_pid);
+            int *np_pid = (int *)shmat(shm_pid, nullptr, 0);
+            tpid = np_pid[tuid];
+            shmdt(np_pid);
+            sem_signal(sem_pid);
+            if (tpid == -1) {
+                cout << "*** Error: user #" << (tuid + 1)
+                     << " does not exist yet. ***" << endl;
+            } else {
+                string msg = "*** " + my_name + " told you ***: " + arg + "\n";
+                sem_wait(sem_msg, tuid);
+                char *np_msg = (char *)shmat(shm_msg[tuid], nullptr, 0);
+                strcpy(np_msg, msg.c_str());
+                shmdt(np_msg);
+                kill(tpid, SIGUSR1);
+            }
         } else if (cmd == "yell") {
             // synopsis: yell [message]
+            ws(ss);
+            getline(ss, arg);
+            string msg = "*** " + my_name + " yelled ***: " + arg + "\n";
+            broadcast(msg);
         } else {
             /* mode
              0: stdout to overwrite file
@@ -203,21 +314,6 @@ void reaper(int sig) {
         ;
 }
 
-void sem_wait(int key, short unsigned int sem = 0) {
-    // lock
-    static struct sembuf act = {sem, -1, SEM_UNDO};
-    semop(key, &act, sizeof(act));
-}
-
-void sem_signal(int key, short unsigned int sem = 0) {
-    // unlock
-    static struct sembuf act = {sem, 1, SEM_UNDO};
-    semop(key, &act, sizeof(act));
-}
-
-int UID = -1;
-int shm_pid, shm_address[30], shm_name[30], shm_msg[30];
-int sem_pid, sem_address, sem_name, sem_msg;
 void cleanIPC(int sig) {
     // shared memory
     shmctl(shm_pid, IPC_RMID, nullptr);
@@ -234,33 +330,11 @@ void cleanIPC(int sig) {
     exit(0);
 }
 
-void broadcast(string msg) {
-    sem_wait(sem_pid);
-    int *np_user = (int *)shmat(shm_pid, nullptr, 0);
-    for (size_t i = 0; i < 30; ++i) {
-        if (np_user[i] != -1) {
-            sem_wait(sem_msg, i);
-            char *np_msg = (char *)shmat(shm_msg[i], nullptr, 0);
-            strcpy(np_msg, msg.c_str());
-            shmdt(np_msg);
-            kill(np_user[i], SIGUSR1);
-        }
-    }
-    for (size_t i = 0; i < 30; ++i) {
-        if (np_user[i] != -1) {
-            sem_wait(sem_msg, i);
-            sem_signal(sem_msg, i);
-        }
-    }
-    shmdt(np_user);
-    sem_signal(sem_pid);
-}
-
 void show_msg(int sig) {
-    char *np_msg = (char *)shmat(shm_msg[UID], nullptr, 0);
+    char *np_msg = (char *)shmat(shm_msg[my_uid], nullptr, 0);
     cout << string(np_msg);
     shmdt(np_msg);
-    sem_signal(sem_msg, UID);
+    sem_signal(sem_msg, my_uid);
 }
 
 int initialize_uid() {
@@ -363,7 +437,9 @@ int main(int argc, char **argv) {
     dup2(csock, 1);
     dup2(csock, 2);
     // message handler
-    UID = uid;
+    my_uid = uid;
+    my_address = address;
+    my_name = "(no name)";
     struct sigaction sa_sigusr1;
     sa_sigusr1.sa_handler = &show_msg;
     sigemptyset(&sa_sigusr1.sa_mask);
@@ -372,8 +448,22 @@ int main(int argc, char **argv) {
          << "** Welcome to the information server. **" << endl
          << "****************************************" << endl;
     // broadcast login
-    string msg =
-        "*** User '(no name)' entered from " + string(address) + ". ***\n";
+    string msg = "*** User '(no name)' entered from " + my_address + ". ***\n";
     broadcast(msg);
+    // npshell
     npshell();
+    // broadcast logout
+    sem_wait(sem_name);
+    char *np_user = (char *)shmat(shm_name[uid], nullptr, 0);
+    msg = "*** User '" + string(np_user) + "' left. ***\n";
+    strcpy(np_user, "(no name)");
+    shmdt(np_user);
+    sem_signal(sem_name);
+    broadcast(msg);
+    // cleanup shell
+    sem_wait(sem_pid);
+    np_pid = (int *)shmat(shm_pid, nullptr, 0);
+    np_pid[uid] = -1;
+    shmdt(np_pid);
+    sem_signal(sem_pid);
 }
