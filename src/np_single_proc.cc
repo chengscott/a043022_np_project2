@@ -100,7 +100,6 @@ deque<int> np_pid_table[30][2000];
 // user pipe
 int np_user_pipe[30][30][2];
 deque<int> np_up_pid[30][30];
-string np_up_cmd[30][30];
 int initialize(int csock) {
     int uid = -1;
     for (size_t i = 0; i < 30; ++i) {
@@ -113,7 +112,7 @@ int initialize(int csock) {
     // info
     np_name[uid] = "(no name)";
     // shell
-    np_env[uid]["PATH"] = "bin:/";
+    np_env[uid]["PATH"] = "bin:.";
     np_line[uid] = 1;
     for (int(&fd)[2] : np_fd_table[uid]) fd[0] = 0, fd[1] = 1;
     for (int(&fd)[2] : np_user_pipe[uid]) fd[0] = 0, fd[1] = 1;
@@ -144,7 +143,7 @@ void terminate(int uid) {
 
 void broadcast(string msg) {
     const char *cmsg = msg.c_str();
-    size_t clen = msg.size() + 1;
+    size_t clen = msg.size();
     for (int sock : np_user) {
         if (sock != -1) {
             write(sock, cmsg, clen);
@@ -192,6 +191,7 @@ int npshell(const int uid) {
         // synopsis: exit
         return -1;
     } else if (cmd == "name") {
+        // synopsis: name [new username]
         ss >> arg;
         bool found = false;
         for (const string &name : np_name) {
@@ -209,6 +209,7 @@ int npshell(const int uid) {
             broadcast(msg);
         }
     } else if (cmd == "who") {
+        // synopsis: who
         cout << "<ID>\t<nickname>\t<IP/port>\t<indicate me>" << endl;
         for (int i = 0; i < 30; ++i) {
             if (np_user[i] != -1) {
@@ -218,19 +219,21 @@ int npshell(const int uid) {
             }
         }
     } else if (cmd == "tell") {
+        // synopsis: tell [user id] [message]
         int tuid;
         ss >> tuid;
         --tuid;
         ws(ss);
         getline(ss, arg);
         if (np_user[tuid] == -1) {
-            cout << "*** Error: user #" << tuid << " does not exist yet. ***"
-                 << endl;
+            cout << "*** Error: user #" << (tuid + 1)
+                 << " does not exist yet. ***" << endl;
         } else {
             string msg = "*** " + np_name[uid] + " told you ***: " + arg + "\n";
-            write(np_user[tuid], msg.c_str(), msg.size() + 1);
+            write(np_user[tuid], msg.c_str(), msg.size());
         }
     } else if (cmd == "yell") {
+        // synopsis: yell [message]
         ws(ss);
         getline(ss, arg);
         string msg = "*** " + np_name[uid] + " yelled ***: " + arg + "\n";
@@ -295,10 +298,10 @@ int npshell(const int uid) {
                      << (uid + 1) << " does not exist yet. ***" << endl;
                 return 0;
             } else {
-                string msg = "*** " + np_name[upin] + " (#" +
-                             to_string(upin + 1) + ") just received from " +
-                             np_name[uid] + " (#" + to_string(uid + 1) +
-                             ") by '" + np_up_cmd[upin][uid] + "' ***\n";
+                string msg = "*** " + np_name[uid] + " (#" +
+                             to_string(uid + 1) + ") just received from " +
+                             np_name[upin] + " (#" + to_string(upin + 1) +
+                             ") by '" + full_cmd + "' ***\n";
                 broadcast(msg);
                 // user pipe
                 pid_table[nline].insert(pid_table[nline].begin(),
@@ -330,8 +333,6 @@ int npshell(const int uid) {
                                              pid_table[nline].begin(),
                                              pid_table[nline].end());
                 pid_table[nline].clear();
-                // save full_cmd
-                np_up_cmd[uid][upout] = full_cmd;
                 // open user pipe
                 while (pipe(np_user_pipe[uid][upout]) == -1)
                     mywait(pid_table[nline]);
@@ -401,10 +402,10 @@ int main(int argc, char **argv) {
     for (int &sock : np_user) sock = -1;
     // welcome message
     const char welcome[] =
-        "***************************************\n"
-        "** Welcome to the information server **\n"
-        "***************************************\n";
-    const size_t wlen = sizeof(welcome);
+        "****************************************\n"
+        "** Welcome to the information server. **\n"
+        "****************************************\n";
+    const size_t wlen = strlen(welcome);
     while (true) {
         memcpy(&rfds, &afds, sizeof(rfds));
         select(nfds, &rfds, nullptr, nullptr, nullptr);
@@ -416,6 +417,7 @@ int main(int argc, char **argv) {
             inet_ntop(AF_INET, &caddr.sin_addr, cip, INET_ADDRSTRLEN);
             np_address[uid] =
                 string(cip) + "/" + to_string(htons(caddr.sin_port));
+            // np_address[uid] = "CGILAB/511";
             // welcome message
             write(csock, welcome, wlen);
             // broadcast login
@@ -423,7 +425,7 @@ int main(int argc, char **argv) {
                          np_address[uid] + ". ***\n";
             broadcast(msg);
             // prompt
-            write(csock, "% ", 3);
+            write(csock, "% ", 2);
         }
         for (int sock = 0; sock < nfds; ++sock) {
             if (sock != ssock && FD_ISSET(sock, &rfds)) {
@@ -438,17 +440,19 @@ int main(int argc, char **argv) {
                 // npshell
                 int ret = npshell(uid);
                 if (ret == -1) {
-                    shutdown(sock, SHUT_RDWR);
-                    close(sock);
-                    FD_CLR(sock, &afds);
                     // broadcast logout
                     string msg = "*** User '" + np_name[uid] + "' left. ***\n";
                     broadcast(msg);
                     // cleanup shell
+                    shutdown(sock, SHUT_RDWR);
+                    close(sock);
+                    FD_CLR(sock, &afds);
                     terminate(uid);
+                    // restore stdfd
+                    for (size_t i = 0; i < 3; ++i) dup2(stdfd[i], i);
                 } else {
                     // prompt
-                    write(sock, "% ", 3);
+                    write(sock, "% ", 2);
                 }
             }
         }
