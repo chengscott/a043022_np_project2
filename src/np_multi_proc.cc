@@ -29,14 +29,14 @@ int sem_pid, sem_address, sem_name, sem_msg;
 
 void sem_wait(int key, short unsigned int sem = 0) {
     // lock
-    static struct sembuf act = {sem, -1, SEM_UNDO};
-    semop(key, &act, sizeof(act));
+    // static struct sembuf act = {sem, -1, SEM_UNDO};
+    // semop(key, &act, 1);
 }
 
 void sem_signal(int key, short unsigned int sem = 0) {
     // unlock
-    static struct sembuf act = {sem, 1, SEM_UNDO};
-    semop(key, &act, sizeof(act));
+    // static struct sembuf act = {sem, 1, SEM_UNDO};
+    // semop(key, &act, 1);
 }
 
 void broadcast(string msg) {
@@ -53,6 +53,9 @@ void broadcast(string msg) {
     }
     shmdt(np_user);
     sem_signal(sem_pid);
+    flush(cout);
+    sem_wait(sem_msg, my_uid);
+    sem_signal(sem_msg, my_uid);
 }
 
 void convert(const vector<string> &from, vector<char *> &to) {
@@ -188,7 +191,7 @@ void npshell() {
                 cout << "*** User '" << arg << "' already exists. ***" << endl;
             } else {
                 np_name = (char *)shmat(shm_name[my_uid], nullptr, 0);
-                my_name = name;
+                my_name = arg;
                 strcpy(np_name, name);
                 shmdt(np_name);
                 string msg = "*** User from " + my_address + " is named '" +
@@ -299,6 +302,7 @@ void npshell() {
                                     pid_table[line].end());
             pid_table[line].clear();
             // prepare fd
+            string bmsg = "";
             if (upin != -1) {
                 --upin;
                 bool found = false;
@@ -323,7 +327,8 @@ void npshell() {
                         "*** " + my_name + " (#" + to_string(my_uid + 1) +
                         ") just received from " + string(np_name) + " (#" +
                         to_string(upin + 1) + ") by '" + full_cmd + "' ***\n";
-                    broadcast(msg);
+                    bmsg += msg;
+                    // broadcast(msg);
                     // open input file
                     fd_table[line][0] = open(up_name.c_str(), O_RDONLY);
                     shmdt(np_name);
@@ -355,7 +360,8 @@ void npshell() {
                                  to_string(my_uid + 1) + ") just piped '" +
                                  full_cmd + "' to " + string(np_name) + " (#" +
                                  to_string(upout + 1) + ") ***\n";
-                    broadcast(msg);
+                    bmsg += msg;
+                    // broadcast(msg);
                     // open output file
                     fd_table[nline][1] =
                         open(up_name.c_str(), O_WRONLY | O_CREAT | O_TRUNC,
@@ -365,6 +371,7 @@ void npshell() {
                 }
                 sem_signal(sem_pid);
             }
+            if (!bmsg.empty()) broadcast(bmsg);
             if (mode == 0) {
                 // 0: open file
                 fd_table[nline][1] =
@@ -458,15 +465,9 @@ int main(int argc, char **argv) {
     sem_address = semget(IPC_PRIVATE, 1, ipcflag);
     sem_name = semget(IPC_PRIVATE, 1, ipcflag);
     sem_msg = semget(IPC_PRIVATE, 30 * 1, ipcflag);
-    //union semun {
-    //    int val;
-    //    struct semid_ds *buf;
-    //    unsigned short *array;
-    //    struct seminfo *__buf;
-    //} semflag;
-    //semflag.val = 1;
-    //semctl(sem_pid, 0, SETVAL, semflag);
-    //semctl(sem_pid, 0, SETVAL, 1);
+    semctl(sem_pid, 0, SETVAL, 1);
+    semctl(sem_address, 0, SETVAL, 1);
+    semctl(sem_name, 0, SETVAL, 1);
     // cleanup ipc
     struct sigaction sa_sigterm;
     sa_sigterm.sa_handler = &cleanIPC;
@@ -475,6 +476,9 @@ int main(int argc, char **argv) {
     sigaction(SIGTERM, &sa_sigterm, nullptr);
     // server socket
     int ssock = socket(AF_INET, SOCK_STREAM, 0);
+    int on = 1;
+    setsockopt(ssock, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
+    setsockopt(ssock, SOL_SOCKET, SO_REUSEPORT, &on, sizeof(on));
     struct sockaddr_in saddr, caddr;
     saddr.sin_family = AF_INET;
     saddr.sin_addr.s_addr = htonl(INADDR_ANY);
@@ -519,6 +523,8 @@ int main(int argc, char **argv) {
         sem_signal(sem_address);
         // shm_pid
         sem_wait(sem_pid);
+        // grant 1 to sem_msg
+        semctl(sem_msg, uid, SETVAL, 1);
         // fork client
         if ((pid = fork()) == 0) {
             close(ssock);
@@ -564,6 +570,7 @@ int main(int argc, char **argv) {
     np_pid[uid] = -1;
     shmdt(np_pid);
     sem_signal(sem_pid);
+    // TODO: wait or kill
     // cleanup pipe
     for (size_t i = 0; i < 30; ++i) {
         string iu_name = "user_pipe/" + to_string(i * 30 + my_uid) + ".txt",

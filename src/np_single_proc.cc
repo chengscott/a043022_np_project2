@@ -376,6 +376,7 @@ int main(int argc, char **argv) {
     int ssock = socket(AF_INET, SOCK_STREAM, 0);
     int on = 1;
     setsockopt(ssock, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
+    setsockopt(ssock, SOL_SOCKET, SO_REUSEPORT, &on, sizeof(on));
     struct sockaddr_in saddr, caddr;
     saddr.sin_family = AF_INET;
     saddr.sin_addr.s_addr = htonl(INADDR_ANY);
@@ -408,7 +409,7 @@ int main(int argc, char **argv) {
     const size_t wlen = strlen(welcome);
     while (true) {
         memcpy(&rfds, &afds, sizeof(rfds));
-        select(nfds, &rfds, nullptr, nullptr, nullptr);
+        if (select(nfds, &rfds, nullptr, nullptr, nullptr) < 0) continue;
         if (FD_ISSET(ssock, &rfds)) {
             csock = accept(ssock, (struct sockaddr *)&caddr, &clen);
             FD_SET(csock, &afds);
