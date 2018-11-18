@@ -252,11 +252,12 @@ void npshell() {
         } else {
             /* mode
              0: stdout to overwrite file
+             8: stdout user pipe
              10: single line stdout pipe (default)
              20: stdout numbered pipe
              21: stdout stderr numbered pipe
             */
-            int np = -1, mode = 10;
+            int mode = 10, np = -1, upin = -1, upout = -1;
             // parse all commands and arguments
             vector<vector<string>> args;
             bool has_next = true;
@@ -268,6 +269,15 @@ void npshell() {
                         mode = 0;
                         ss >> cmd;
                         break;
+                    } else if (arg[0] == '>') {
+                        mode = 8;
+                        upout = stoi(arg.substr(1, arg.size() - 1));
+                        assert(upout >= 0);
+                        continue;
+                    } else if (arg[0] == '<') {
+                        upin = stoi(arg.substr(1, arg.size() - 1));
+                        assert(upin >= 0);
+                        continue;
                     } else if (arg == "|") {
                         has_next = true;
                         ss >> cmd;
@@ -289,6 +299,72 @@ void npshell() {
                                     pid_table[line].end());
             pid_table[line].clear();
             // prepare fd
+            if (upin != -1) {
+                --upin;
+                bool found = false;
+                sem_wait(sem_pid);
+                int *np_pid = (int *)shmat(shm_pid, nullptr, 0);
+                if (np_pid[upin] != -1) found = true;
+                shmdt(np_pid);
+                string up_name =
+                    "user_pipe/" + to_string(upin * 30 + my_uid) + ".txt";
+                if (upin > 30 || !found) {
+                    cout << "*** Error: user #" << (upin + 1)
+                         << " does not exist yet. ***" << endl;
+                    continue;
+                } else if (access(up_name.c_str(), F_OK) == -1) {
+                    cout << "*** Error: the pipe #" << (upin + 1) << "->#"
+                         << (my_uid + 1) << " does not exist yet. ***" << endl;
+                    continue;
+                } else {
+                    sem_wait(sem_name);
+                    char *np_name = (char *)shmat(shm_name[upin], nullptr, 0);
+                    string msg =
+                        "*** " + my_name + " (#" + to_string(my_uid + 1) +
+                        ") just received from " + string(np_name) + " (#" +
+                        to_string(upin + 1) + ") by '" + full_cmd + "' ***\n";
+                    broadcast(msg);
+                    // open input file
+                    fd_table[line][0] = open(up_name.c_str(), O_RDONLY);
+                    shmdt(np_name);
+                    sem_signal(sem_name);
+                }
+                sem_signal(sem_pid);
+            }
+            if (upout != -1) {
+                --upout;
+                bool found = false;
+                sem_wait(sem_pid);
+                int *np_pid = (int *)shmat(shm_pid, nullptr, 0);
+                if (np_pid[upout] != -1) found = true;
+                shmdt(np_pid);
+                string up_name =
+                    "user_pipe/" + to_string(my_uid * 30 + upout) + ".txt";
+                if (upout > 30 || !found) {
+                    cout << "*** Error: user #" << (upout + 1)
+                         << " does not exist yet. ***" << endl;
+                    continue;
+                } else if (access(up_name.c_str(), F_OK) != -1) {
+                    cout << "*** Error: the pipe #" << (my_uid + 1) << "->#"
+                         << (upout + 1) << " already exists. ***" << endl;
+                    continue;
+                } else {
+                    sem_wait(sem_name);
+                    char *np_name = (char *)shmat(shm_name[upout], nullptr, 0);
+                    string msg = "*** " + my_name + " (#" +
+                                 to_string(my_uid + 1) + ") just piped '" +
+                                 full_cmd + "' to " + string(np_name) + " (#" +
+                                 to_string(upout + 1) + ") ***\n";
+                    broadcast(msg);
+                    // open output file
+                    fd_table[nline][1] =
+                        open(up_name.c_str(), O_WRONLY | O_CREAT | O_TRUNC,
+                             file_perm);
+                    shmdt(np_name);
+                    sem_signal(sem_name);
+                }
+                sem_signal(sem_pid);
+            }
             if (mode == 0) {
                 // 0: open file
                 fd_table[nline][1] =
@@ -304,6 +380,11 @@ void npshell() {
             exec(args, pid_table[nline], fd_table[line][0], fd_table[nline][1],
                  mode);
             if (IS_PIPE(fd_table[line][0])) close(fd_table[line][0]);
+            if (upin != -1) {
+                string up_name =
+                    "user_pipe/" + to_string(upin * 30 + my_uid) + ".txt";
+                remove(up_name.c_str());
+            }
             // wait for current line
             if (mode < 20) {
                 for (int p : pid_table[nline]) waitpid(p, nullptr, 0);
@@ -361,7 +442,7 @@ int initialize_uid() {
 
 int main(int argc, char **argv) {
     // shared memory
-    const int ipcflag = IPC_CREAT | 0600;
+    const int ipcflag = IPC_CREAT | 0666;
     shm_pid = shmget(IPC_PRIVATE, 30 * sizeof(int), ipcflag);
     for (size_t i = 0; i < 30; ++i) {
         shm_address[i] = shmget(IPC_PRIVATE, 24, ipcflag);
@@ -377,6 +458,15 @@ int main(int argc, char **argv) {
     sem_address = semget(IPC_PRIVATE, 1, ipcflag);
     sem_name = semget(IPC_PRIVATE, 1, ipcflag);
     sem_msg = semget(IPC_PRIVATE, 30 * 1, ipcflag);
+    //union semun {
+    //    int val;
+    //    struct semid_ds *buf;
+    //    unsigned short *array;
+    //    struct seminfo *__buf;
+    //} semflag;
+    //semflag.val = 1;
+    //semctl(sem_pid, 0, SETVAL, semflag);
+    //semctl(sem_pid, 0, SETVAL, 1);
     // cleanup ipc
     struct sigaction sa_sigterm;
     sa_sigterm.sa_handler = &cleanIPC;
@@ -474,4 +564,11 @@ int main(int argc, char **argv) {
     np_pid[uid] = -1;
     shmdt(np_pid);
     sem_signal(sem_pid);
+    // cleanup pipe
+    for (size_t i = 0; i < 30; ++i) {
+        string iu_name = "user_pipe/" + to_string(i * 30 + my_uid) + ".txt",
+               ui_name = "user_pipe/" + to_string(my_uid * 30 + i) + ".txt";
+        remove(iu_name.c_str());
+        remove(ui_name.c_str());
+    }
 }
