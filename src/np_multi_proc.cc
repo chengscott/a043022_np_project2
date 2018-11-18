@@ -23,6 +23,7 @@ using namespace std;
 
 int my_uid = -1;
 string my_address, my_name;
+bool is_signaled = false;
 int shm_pid, shm_address[30], shm_name[30], shm_msg[30];
 int sem_pid, sem_address, sem_name, sem_msg;
 
@@ -137,10 +138,15 @@ void npshell() {
         // prompt string
         cout << "% ";
         // EOF
-        if (!getline(cin, cmd)) {
-            cout << endl;
-            break;
+        while (!getline(cin, cmd)) {
+            if (is_signaled) {
+                is_signaled = false;
+                cin.clear();
+            } else
+                break;
         }
+        if (cin.eof()) break;
+        // remove \r\n
         if (!cmd.empty() && cmd[cmd.length() - 1] == '\n')
             cmd.erase(cmd.length() - 1);
         if (!cmd.empty() && cmd[cmd.length() - 1] == '\r')
@@ -335,6 +341,7 @@ void show_msg(int sig) {
     cout << string(np_msg);
     shmdt(np_msg);
     sem_signal(sem_msg, my_uid);
+    is_signaled = true;
 }
 
 int initialize_uid() {
@@ -405,7 +412,8 @@ int main(int argc, char **argv) {
     while (true) {
         csock = accept(ssock, (struct sockaddr *)&caddr, &clen);
         inet_ntop(AF_INET, &caddr.sin_addr, cip, INET_ADDRSTRLEN);
-        address = string(cip) + "/" + to_string(htons(caddr.sin_port));
+        // address = string(cip) + "/" + to_string(htons(caddr.sin_port));
+        address = "CGILAB/511";
         uid = initialize_uid();
         // shm_name
         sem_wait(sem_name);
